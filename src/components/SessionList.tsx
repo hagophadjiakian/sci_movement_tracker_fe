@@ -115,7 +115,7 @@ export const SessionList: React.FC<Props> = ({ sessions, onRetry, onLoad }) => {
               }}
             >
               <span className="text-sm text-slate-200">{new Date(s.startedAt).toLocaleString()}</span>
-              <span className="text-xs text-slate-400">{(s.durationS / 60).toFixed(1)} min</span>
+              <span className="text-xs text-slate-400">{s.durationS < 60 ? `${Math.round(s.durationS)} s` : `${(s.durationS / 60).toFixed(1)} min`}</span>
               <span className={`ml-auto text-xs px-2 py-0.5 rounded-full ${badge[status]}`}>{status}</span>
             </button>
             {isOpen && (

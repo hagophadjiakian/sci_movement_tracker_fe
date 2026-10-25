@@ -158,7 +158,13 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
       if (cancelled) return;
       console.error('Pose model error:', err);
       setModelStatus('error');
-      setModelError(err instanceof Error ? err.message : String(err));
+      setModelError(
+        err instanceof Error
+          ? err.message
+          : err instanceof Event
+          ? 'could not download the model or WebAssembly files (check the internet connection)'
+          : String(err),
+      );
     };
 
     const loop = () => {
