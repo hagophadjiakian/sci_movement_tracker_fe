@@ -66,8 +66,15 @@ export class LiveDetector {
         st = { t: [], v: [], over: null, under: null, active: null };
         this.ch.set(name, st);
       }
+      // Keep angles continuous across +/-180 (a segment near horizontal when lying down flips sign).
+      let v = val;
+      const prev = st.v.length ? st.v[st.v.length - 1] : null;
+      if (prev !== null && META[name]?.unit !== '%') {
+        while (v - prev > 180) v -= 360;
+        while (v - prev < -180) v += 360;
+      }
       st.t.push(now);
-      st.v.push(val);
+      st.v.push(v);
       while (st.t.length && now - st.t[0] > 3.5) {
         st.t.shift();
         st.v.shift();
@@ -100,7 +107,7 @@ export class LiveDetector {
           st.over = null;
           // Forget the history so the new resting position is learned fresh.
           st.t = [now];
-          st.v = [val];
+          st.v = [v];
           continue;
         }
         moving.push({ channel: name, label: meta.label, unit: meta.unit, excursion: Math.round(dev), since: st.active.start });

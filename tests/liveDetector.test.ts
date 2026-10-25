@@ -28,5 +28,14 @@ if (slowLow.detectedAt !== null) fail('slow 4° lift should be ignored on low');
 const fast = run('medium', 30, 0.5);
 if (fast.detectedAt === null || fast.detectedAt > 8.5) fail(`fast lift detected late: ${fast.detectedAt}`);
 if (!fast.events.some((e) => e.channel === 'left.hip_flexion' && Math.abs(e.excursion - 30) <= 3)) fail('event size wrong');
-console.log(fails ? `${fails} live-detector checks failed` : `live detector: 5/5 checks passed (slow lift caught at ${slowHigh.detectedAt?.toFixed(2)} s)`);
+// lying down: segment near +/-180 must not trigger
+{
+  const d = new LiveDetector('high');
+  for (let i = 0; i < 300; i++) {
+    const raw = 179 + noise(1);
+    const v = ((raw + 180) % 360) - 180;
+    if (d.update(i / 30, { 'left.shank_incl': v }).length) { fail('wrap at 180 flagged as movement'); break; }
+  }
+}
+console.log(fails ? `${fails} live-detector checks failed` : `live detector: 6/6 checks passed (slow lift caught at ${slowHigh.detectedAt?.toFixed(2)} s)`);
 if (fails) process.exit(1);
