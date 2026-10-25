@@ -111,7 +111,11 @@ export const AngleTables: React.FC<Props> = ({ values, meta }) => {
         <span>
           Reference:{' '}
           <span className="text-slate-200">
-            {meta.frame === 'trunk'
+            {meta.dims === '2d'
+              ? `2D ${meta.view ?? ''} view${meta.facing ? `, facing ${meta.facing}` : ''}: only movements in the camera's plane are measured${
+                  meta.view === 'side' ? ' (flexion/extension)' : meta.view === 'front' ? ' (abduction, side lean)' : ''
+                }; fingers and wrist without direction`
+              : meta.frame === 'trunk'
               ? 'trunk (hips visible)'
               : meta.frame === 'shoulders'
               ? 'shoulders only (hips hidden: hip, knee, trunk, pelvis not measured)'
@@ -152,7 +156,7 @@ export const AngleTables: React.FC<Props> = ({ values, meta }) => {
         </details>
       ))}
       <p className="text-xs text-slate-500">
-        Toes: the body model has a single point per foot, so toe joints cannot be measured from video.
+        Toes: both engines give only toe tips (no toe joints), so toe bending cannot be measured from video. Rotations need the 3D browser engine or, later, several cameras.
       </p>
     </div>
   );

@@ -202,6 +202,10 @@ export interface HandPoints {
 export interface AngleMeta {
   frame: 'trunk' | 'shoulders' | null;
   hand: Record<Side, 'hand' | 'pose' | null>;
+  engine?: 'mediapipe' | 'rtmpose';
+  dims?: '3d' | '2d';
+  view?: 'side' | 'front';
+  facing?: 'left' | 'right' | null;
 }
 
 export interface AngleResult {

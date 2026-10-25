@@ -22,6 +22,8 @@ export interface FinishedRecording {
   t: number[];
   joints: Record<string, (number | null)[]>;
   events: SessionEvent[];
+  engine?: 'browser' | 'rtmpose';
+  sensitivity?: 'low' | 'medium' | 'high';
 }
 
 export class SessionRecorder {

@@ -63,6 +63,8 @@ export function App() {
         clinical_context: clinicalContext.trim() || null,
         started_at: rec.startedAt,
         stop_reason: rec.stopReason,
+        sensitivity: rec.sensitivity ?? 'medium',
+        engine: rec.engine ?? 'browser',
         t: rec.t,
         joints: rec.joints,
         events: rec.events,
