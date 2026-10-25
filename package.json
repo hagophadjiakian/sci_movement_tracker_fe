@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:angles": "esbuild tests/synthetic.ts --bundle --platform=node --outfile=node_modules/.cache/synthetic.cjs --log-level=warning && node node_modules/.cache/synthetic.cjs",
+    "test:sides": "esbuild tests/sideTracker.test.ts --bundle --platform=node --outfile=node_modules/.cache/sides.cjs --log-level=warning && node node_modules/.cache/sides.cjs",
+    "test": "npm run test:angles && npm run test:sides",
+    "docs:angles": "esbuild scripts/gen-angle-docs.ts --bundle --platform=node --outfile=node_modules/.cache/gen-docs.cjs --log-level=warning && node node_modules/.cache/gen-docs.cjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.14",

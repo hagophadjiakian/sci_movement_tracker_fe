@@ -43,6 +43,7 @@ export interface SessionResult {
   joints: JointSummary[];
   bouts: MovementBout[];
   summary: string;
+  not_assessed: string[];
   ai_note: string | null;
   caveats: string[];
 }

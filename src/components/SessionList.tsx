@@ -23,6 +23,14 @@ function Result({ info }: { info: SessionInfo }) {
   return (
     <div className="space-y-3 text-sm">
       <p className="text-slate-300">{r.summary}</p>
+      {r.not_assessed?.length > 0 && (
+        <details className="text-xs text-amber-300">
+          <summary className="cursor-pointer">
+            {r.not_assessed.length} movements were not visible enough to assess (unknown, not “no movement”)
+          </summary>
+          <p className="mt-1 text-amber-200/80">{r.not_assessed.map(label).join(', ')}</p>
+        </details>
+      )}
       {r.ai_note && <p className="text-slate-400 italic border-l-2 border-slate-700 pl-3">{r.ai_note}</p>}
       {moved.length > 0 && (
         <table className="w-full text-xs">
@@ -63,7 +71,7 @@ function Result({ info }: { info: SessionInfo }) {
                 <tr key={i} className="border-t border-slate-800">
                   <td className="py-1 font-mono">{b.start.toFixed(1)}s</td>
                   <td className="py-1">{label(b.joint)}</td>
-                  <td className="py-1 text-right">{b.excursion_deg.toFixed(0)}°</td>
+                  <td className="py-1 text-right">{b.excursion_deg.toFixed(0)}{/_(aperture|elevation)$/.test(b.joint) ? '%' : '°'}</td>
                   <td className="py-1 pl-2 text-amber-300">
                     {[
                       b.driver === 'trunk' && 'trunk drove it',

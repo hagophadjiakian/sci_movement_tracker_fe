@@ -1,19 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
+import { FilesetResolver, HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
 import type { Analysis } from '../types';
 import {
-  AXIAL_JOINTS,
-  BodyAngles,
-  JOINT_LABELS,
+  AngleMeta,
+  HAND_SKELETON,
+  HandPoints,
+  POSE_SKELETON,
   Pt,
-  SIDE_JOINTS,
-  SKELETON,
-  computeBodyAngles,
-  emptyAngles,
-  flatten,
+  Side,
+  ZEROABLE,
+  computeAngles,
+  emptyValues,
+  isSeen,
 } from '../lib/angles';
+import { SideTracker } from '../lib/sideTracker';
 import { FinishedRecording, MAX_MS, SessionRecorder, StopReason } from '../lib/recorder';
 import { VoiceListener, speak } from '../lib/voice';
+import { AngleTables } from './AngleTables';
 
 interface MotionTrackerProps {
   sciLevel: string;
@@ -23,33 +26,94 @@ interface MotionTrackerProps {
   onRecordingFinished: (rec: FinishedRecording) => void;
 }
 
-const MIN_VISIBILITY = 0.5;
-const UI_UPDATE_MS = 100;
+const UI_UPDATE_MS = 150;
 const TASKS_VERSION = '0.10.14'; // keep in sync with package.json
 const WASM_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VERSION}/wasm`;
-const MODEL_URL =
+const POSE_MODEL =
   'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task';
+const HAND_MODEL =
+  'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 const API_BASE = import.meta.env.VITE_API_URL ?? '';
+const NEUTRAL_KEY = 'neuromotion.neutral';
+const COLORS = { left: '#38bdf8', right: '#fb923c', mid: '#e2e8f0' } as const;
+const HAND_MATCH_DIST = 0.15; // max image distance between hand-model wrist and pose wrist
 
-function drawSkeleton(ctx: CanvasRenderingContext2D, lm: Pt[], w: number, h: number, recording: boolean) {
-  const ok = (i: number) => (lm[i]?.visibility ?? 0) >= MIN_VISIBILITY;
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = recording ? '#f87171' : '#38bdf8';
-  for (const [a, b] of SKELETON) {
-    if (!ok(a) || !ok(b)) continue;
+const loadNeutral = (): Record<string, number> => {
+  try {
+    return JSON.parse(localStorage.getItem(NEUTRAL_KEY) ?? '{}');
+  } catch {
+    return {};
+  }
+};
+
+// Give each hand found by the hand model to the arm whose pose wrist is closest.
+function assignHands(pose: Pt[], hands: { image: Pt[]; world: Pt[] }[]): Partial<Record<Side, HandPoints>> {
+  const wrists: Record<Side, Pt | undefined> = {
+    left: isSeen(pose[15]) ? pose[15] : undefined,
+    right: isSeen(pose[16]) ? pose[16] : undefined,
+  };
+  const pairs: { side: Side; i: number; d: number }[] = [];
+  hands.forEach((h, i) => {
+    for (const side of ['left', 'right'] as Side[]) {
+      const w = wrists[side];
+      if (!w || !h.image[0]) continue;
+      const d = Math.hypot(h.image[0].x - w.x, h.image[0].y - w.y);
+      if (d < HAND_MATCH_DIST) pairs.push({ side, i, d });
+    }
+  });
+  pairs.sort((a, b) => a.d - b.d);
+  const out: Partial<Record<Side, HandPoints>> = {};
+  const used = new Set<number>();
+  for (const p of pairs) {
+    if (out[p.side] || used.has(p.i)) continue;
+    out[p.side] = hands[p.i];
+    used.add(p.i);
+  }
+  return out;
+}
+
+function draw(
+  ctx: CanvasRenderingContext2D,
+  pose: Pt[],
+  hands: Partial<Record<Side, HandPoints>>,
+  w: number,
+  h: number,
+  recording: boolean,
+) {
+  const ok = (i: number) => isSeen(pose[i]);
+  ctx.lineWidth = recording ? 5 : 4;
+  for (const seg of POSE_SKELETON) {
+    if (!ok(seg.a) || !ok(seg.b)) continue;
+    ctx.strokeStyle = COLORS[seg.side];
     ctx.beginPath();
-    ctx.moveTo(lm[a].x * w, lm[a].y * h);
-    ctx.lineTo(lm[b].x * w, lm[b].y * h);
+    ctx.moveTo(pose[seg.a].x * w, pose[seg.a].y * h);
+    ctx.lineTo(pose[seg.b].x * w, pose[seg.b].y * h);
     ctx.stroke();
   }
-  ctx.fillStyle = '#f8fafc';
-  lm.forEach((p, i) => {
-    if (i < 11 && i !== 0 && i !== 7 && i !== 8) return; // skip face detail
-    if (!ok(i)) return;
+  ctx.lineWidth = 2;
+  for (const side of ['left', 'right'] as Side[]) {
+    const hp = hands[side];
+    if (!hp) continue;
+    ctx.strokeStyle = COLORS[side];
+    for (const [a, b] of HAND_SKELETON) {
+      ctx.beginPath();
+      ctx.moveTo(hp.image[a].x * w, hp.image[a].y * h);
+      ctx.lineTo(hp.image[b].x * w, hp.image[b].y * h);
+      ctx.stroke();
+    }
+  }
+  ctx.font = 'bold 16px system-ui, sans-serif';
+  for (const [i, label, side] of [[15, 'L', 'left'], [16, 'R', 'right']] as const) {
+    if (!ok(i)) continue;
+    ctx.fillStyle = COLORS[side];
+    ctx.fillText(label, pose[i].x * w + 8, pose[i].y * h - 8);
+  }
+  if (recording) {
+    ctx.fillStyle = '#ef4444';
     ctx.beginPath();
-    ctx.arc(p.x * w, p.y * h, 4, 0, Math.PI * 2);
+    ctx.arc(20, 20, 8, 0, Math.PI * 2);
     ctx.fill();
-  });
+  }
 }
 
 const mmss = (ms: number) => {
@@ -66,27 +130,34 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const anglesRef = useRef<BodyAngles>(emptyAngles());
+  const valuesRef = useRef<Record<string, number | null>>(emptyValues());
+  const rawRef = useRef<Record<string, number | null>>(emptyValues());
+  const neutralRef = useRef<Record<string, number>>(loadNeutral());
   const lastUiUpdate = useRef(0);
   const recorderRef = useRef<SessionRecorder | null>(null);
   const voiceRef = useRef<VoiceListener | null>(null);
+  const sidesRef = useRef(new SideTracker());
   const finishedCb = useRef(onRecordingFinished);
   finishedCb.current = onRecordingFinished;
 
-  const [angles, setAngles] = useState<BodyAngles>(emptyAngles());
+  const [values, setValues] = useState<Record<string, number | null>>(emptyValues());
+  const [meta, setMeta] = useState<AngleMeta>({ frame: null, hand: { left: null, right: null } });
+  const [fps, setFps] = useState(0);
   const [cameraStatus, setCameraStatus] = useState<'starting' | 'running' | 'error'>('starting');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [modelStatus, setModelStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [modelError, setModelError] = useState<string | null>(null);
+  const [handStatus, setHandStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [neutralSet, setNeutralSet] = useState(Object.keys(neutralRef.current).length > 0);
   const [loading, setLoading] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
 
-  const [recElapsed, setRecElapsed] = useState<number | null>(null); // null = not recording
+  const [recElapsed, setRecElapsed] = useState<number | null>(null);
   const [voiceStatus, setVoiceStatus] = useState<'off' | 'listening' | 'unsupported' | 'error'>('off');
-  const [voiceDetail, setVoiceDetail] = useState<string>('');
+  const [voiceDetail, setVoiceDetail] = useState('');
   const [heard, setHeard] = useState('');
 
-  // ---- recording control -------------------------------------------------
+  // ---- recording control ---------------------------------------------------
   const startRecording = useCallback((how: string) => {
     if (recorderRef.current) {
       recorderRef.current.event('command', how);
@@ -100,14 +171,13 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
   const finishRecording = useCallback((reason: StopReason) => {
     const rec = recorderRef.current;
     if (!rec) return;
-    recorderRef.current = null; // a new recording can start right away
+    recorderRef.current = null;
     setRecElapsed(null);
     const data = rec.finish(reason);
     speak(reason === 'time_limit' ? 'Five minutes reached. Recording saved, analysing now.' : 'Recording saved, analysing now.');
     if (data.t.length >= 2) finishedCb.current(data);
   }, []);
 
-  // Timer: warnings at 4:00 and 4:30, end at 5:00.
   useEffect(() => {
     const id = window.setInterval(() => {
       const rec = recorderRef.current;
@@ -140,72 +210,145 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
     voiceRef.current = v;
     v.start();
   };
-
   useEffect(() => () => voiceRef.current?.stop(), []);
 
-  // ---- camera + pose loop ------------------------------------------------
+  // ---- neutral posture (for movements with no anatomical zero) -------------
+  const setNeutral = () => {
+    const raw = rawRef.current;
+    const n: Record<string, number> = {};
+    for (const k of ZEROABLE) if (raw[k] !== null && raw[k] !== undefined) n[k] = raw[k] as number;
+    neutralRef.current = n;
+    setNeutralSet(Object.keys(n).length > 0);
+    try {
+      localStorage.setItem(NEUTRAL_KEY, JSON.stringify(n));
+    } catch {
+      /* storage unavailable */
+    }
+    recorderRef.current?.event('note', 'neutral posture set');
+  };
+  const clearNeutral = () => {
+    neutralRef.current = {};
+    setNeutralSet(false);
+    try {
+      localStorage.removeItem(NEUTRAL_KEY);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // ---- camera + models + per-frame loop -----------------------------------
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-
     let cancelled = false;
     let rafId = 0;
+    let vfcId = 0;
     let stream: MediaStream | null = null;
-    let landmarker: PoseLandmarker | null = null;
+    let pose: PoseLandmarker | null = null;
+    let handLm: HandLandmarker | null = null;
     let lastVideoTime = -1;
+    let frames = 0;
+    let fpsT0 = performance.now();
 
-    const failModel = (err: unknown) => {
-      if (cancelled) return;
-      console.error('Pose model error:', err);
-      setModelStatus('error');
-      setModelError(
-        err instanceof Error
-          ? err.message
-          : err instanceof Event
-          ? 'could not download the model or WebAssembly files (check the internet connection)'
-          : String(err),
-      );
-    };
+    const errText = (err: unknown) =>
+      err instanceof Error
+        ? err.message
+        : err instanceof Event
+        ? 'could not download the model or WebAssembly files (check the internet connection)'
+        : String(err);
 
-    const loop = () => {
-      if (cancelled) return;
-      rafId = requestAnimationFrame(loop);
+    const process = () => {
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext('2d');
       if (!canvas || !ctx || video.readyState < 2) return;
-      if (video.currentTime === lastVideoTime) return;
-      lastVideoTime = video.currentTime;
-
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      let next = emptyAngles();
-      if (landmarker) {
+
+      let raw = emptyValues();
+      let m: AngleMeta = { frame: null, hand: { left: null, right: null } };
+      if (pose) {
         try {
-          const result = landmarker.detectForVideo(video, performance.now());
-          const image = result.landmarks[0];
-          const world = result.worldLandmarks[0];
-          if (image && world) {
-            next = computeBodyAngles(image, world);
-            drawSkeleton(ctx, image, canvas.width, canvas.height, !!recorderRef.current);
+          const now = performance.now();
+          const res = pose.detectForVideo(video, now);
+          const img0 = res.landmarks[0] as Pt[] | undefined;
+          const wld0 = res.worldLandmarks[0] as Pt[] | undefined;
+          if (img0 && wld0) {
+            const fixed = sidesRef.current.fix(img0, wld0);
+            let hands: Partial<Record<Side, HandPoints>> = {};
+            if (handLm) {
+              try {
+                const hr = handLm.detectForVideo(video, now);
+                hands = assignHands(
+                  fixed.image,
+                  hr.landmarks.map((l, i) => ({ image: l as Pt[], world: hr.worldLandmarks[i] as Pt[] })),
+                );
+              } catch {
+                /* hand model hiccup: carry on with pose-only hand points */
+              }
+            }
+            const r = computeAngles(fixed.image, fixed.world, hands);
+            raw = r.values;
+            m = r.meta;
+            draw(ctx, fixed.image, hands, canvas.width, canvas.height, !!recorderRef.current);
+          } else {
+            sidesRef.current.reset();
           }
         } catch (err) {
-          landmarker = null;
-          failModel(err);
+          pose = null;
+          setModelStatus('error');
+          setModelError(errText(err));
         }
       }
-      anglesRef.current = next;
-      recorderRef.current?.push(flatten(next));
 
+      // Apply the neutral posture to movements that have no anatomical zero.
+      const vals = { ...raw };
+      for (const [k, off] of Object.entries(neutralRef.current)) {
+        const x = vals[k];
+        if (x !== null && x !== undefined) vals[k] = Math.round((x - off) * 10) / 10;
+      }
+      rawRef.current = raw;
+      valuesRef.current = vals;
+      recorderRef.current?.push(vals);
+
+      frames++;
       const now = performance.now();
+      if (now - fpsT0 >= 1000) {
+        setFps(Math.round((frames * 1000) / (now - fpsT0)));
+        frames = 0;
+        fpsT0 = now;
+      }
       if (now - lastUiUpdate.current >= UI_UPDATE_MS) {
         lastUiUpdate.current = now;
-        setAngles(next);
+        setValues(vals);
+        setMeta(m);
+      }
+    };
+
+    // Process each real camera frame once (not every screen refresh).
+    const schedule = () => {
+      if (cancelled) return;
+      const vv = video as HTMLVideoElement & {
+        requestVideoFrameCallback?: (cb: () => void) => number;
+      };
+      if (typeof vv.requestVideoFrameCallback === 'function') {
+        vfcId = vv.requestVideoFrameCallback(() => {
+          process();
+          schedule();
+        });
+      } else {
+        rafId = requestAnimationFrame(() => {
+          if (video.currentTime !== lastVideoTime) {
+            lastVideoTime = video.currentTime;
+            process();
+          }
+          schedule();
+        });
       }
     };
 
     (async () => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 640, height: 480, facingMode: 'user' },
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } },
           audio: false,
         });
         if (cancelled) {
@@ -215,8 +358,13 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
         video.srcObject = stream;
         await video.play();
         if (cancelled) return;
+        const c = canvasRef.current;
+        if (c && video.videoWidth) {
+          c.width = video.videoWidth;
+          c.height = video.videoHeight;
+        }
         setCameraStatus('running');
-        rafId = requestAnimationFrame(loop);
+        schedule();
       } catch (err) {
         if (cancelled) return;
         setCameraStatus('error');
@@ -227,46 +375,67 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
     (async () => {
       try {
         const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-        const create = (delegate: 'GPU' | 'CPU') =>
+        const withFallback = async <T,>(make: (d: 'GPU' | 'CPU') => Promise<T>) => {
+          try {
+            return await make('GPU');
+          } catch {
+            return await make('CPU');
+          }
+        };
+        const p = await withFallback((delegate) =>
           PoseLandmarker.createFromOptions(vision, {
-            baseOptions: { modelAssetPath: MODEL_URL, delegate },
+            baseOptions: { modelAssetPath: POSE_MODEL, delegate },
             runningMode: 'VIDEO',
             numPoses: 1,
             minPoseDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5,
-          });
-        let lm: PoseLandmarker;
-        try {
-          lm = await create('GPU');
-        } catch {
-          lm = await create('CPU');
-        }
-        if (cancelled) {
-          lm.close();
-          return;
-        }
-        landmarker = lm;
+          }),
+        );
+        if (cancelled) return p.close();
+        pose = p;
         setModelStatus('ready');
+        try {
+          const hl = await withFallback((delegate) =>
+            HandLandmarker.createFromOptions(vision, {
+              baseOptions: { modelAssetPath: HAND_MODEL, delegate },
+              runningMode: 'VIDEO',
+              numHands: 2,
+              minHandDetectionConfidence: 0.5,
+              minTrackingConfidence: 0.5,
+            }),
+          );
+          if (cancelled) return hl.close();
+          handLm = hl;
+          setHandStatus('ready');
+        } catch {
+          setHandStatus('error'); // body tracking still works; fingers unavailable
+        }
       } catch (err) {
-        failModel(err);
+        if (cancelled) return;
+        setModelStatus('error');
+        setModelError(errText(err));
       }
     })();
 
     return () => {
       cancelled = true;
       cancelAnimationFrame(rafId);
+      const vv = video as HTMLVideoElement & { cancelVideoFrameCallback?: (id: number) => void };
+      if (vfcId && vv.cancelVideoFrameCallback) vv.cancelVideoFrameCallback(vfcId);
       stream?.getTracks().forEach((t) => t.stop());
       video.srcObject = null;
-      landmarker?.close();
-      landmarker = null;
+      pose?.close();
+      handLm?.close();
+      pose = null;
+      handLm = null;
     };
   }, []);
 
-  // ---- single-pose AI estimate (snapshot) --------------------------------
-  const anyVisible = Object.values(flatten(angles)).some((v) => v !== null);
+  // ---- snapshot AI estimate ----------------------------------------------------
+  const anyVisible = Object.values(values).some((v) => v !== null);
 
   const sendSnapshot = async () => {
-    const a = anglesRef.current;
+    const channels = Object.fromEntries(Object.entries(valuesRef.current).filter(([, v]) => v !== null));
     setLoading(true);
     setRequestError(null);
     try {
@@ -276,7 +445,7 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
         body: JSON.stringify({
           sci_level: sciLevel,
           ais_grade: aisGrade,
-          angles: { left: a.left, right: a.right, axial: a.axial, timestamp: Date.now() },
+          channels,
           exercise_name: 'Whole-body posture snapshot',
           clinical_context: clinicalContext.trim() || null,
         }),
@@ -302,13 +471,11 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
     }
   };
 
-  const fmt = (v: number | null) => (v === null ? '—' : `${Math.round(v)}°`);
   const recording = recElapsed !== null;
   const remaining = recording ? MAX_MS - recElapsed : 0;
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col items-center gap-4">
-      {/* Recording / voice bar */}
       <div className="w-full flex flex-wrap items-center gap-3">
         <button
           onClick={toggleVoice}
@@ -323,8 +490,23 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
             End recording
           </button>
         ) : (
-          <button onClick={() => startRecording('button')} className="px-3 py-2 rounded-lg text-sm bg-slate-800 text-slate-200 hover:bg-slate-700">
+          <button
+            onClick={() => startRecording('button')}
+            className="px-3 py-2 rounded-lg text-sm bg-slate-800 text-slate-200 hover:bg-slate-700"
+          >
             Start recording
+          </button>
+        )}
+        <button
+          onClick={setNeutral}
+          title="Sit or lie still in your normal posture, then press. Zeroes neck and shoulder-girdle movements."
+          className="px-3 py-2 rounded-lg text-sm bg-slate-800 text-slate-200 hover:bg-slate-700"
+        >
+          {neutralSet ? 'Reset neutral posture' : 'Set neutral posture'}
+        </button>
+        {neutralSet && (
+          <button onClick={clearNeutral} className="text-xs text-slate-400 underline">
+            clear
           </button>
         )}
         <div className="ml-auto text-right">
@@ -344,14 +526,15 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
             : `Voice error: ${voiceDetail}. Check microphone permission.`}
         </p>
       )}
-      {voiceStatus === 'listening' && heard && (
-        <p className="w-full text-xs text-slate-500 truncate">Heard: “{heard}”</p>
-      )}
+      {voiceStatus === 'listening' && heard && <p className="w-full text-xs text-slate-500 truncate">Heard: “{heard}”</p>}
 
-      <div className="relative w-full max-w-[640px] aspect-[4/3] bg-black rounded-xl overflow-hidden border border-slate-800">
+      <div className="relative w-full max-w-[720px] aspect-video bg-black rounded-xl overflow-hidden border border-slate-800">
         <video ref={videoRef} className="absolute w-px h-px opacity-0 pointer-events-none" playsInline muted />
-        <canvas ref={canvasRef} width={640} height={480} className="w-full h-full object-cover" />
+        <canvas ref={canvasRef} width={1280} height={720} className="w-full h-full object-contain" />
         {recording && <div className="absolute inset-0 border-4 border-red-500/70 rounded-xl pointer-events-none" />}
+        <div className="absolute top-2 right-2 text-xs bg-black/60 rounded px-2 py-0.5 text-slate-200">
+          {fps} fps · hands {handStatus === 'ready' ? 'on' : handStatus === 'loading' ? 'loading' : 'off'}
+        </div>
         {(cameraStatus !== 'running' || modelStatus !== 'ready') && (
           <div className="absolute inset-x-0 bottom-0 p-2 text-center text-xs text-slate-200 bg-black/70">
             {cameraStatus === 'error'
@@ -360,54 +543,15 @@ export const MotionTracker: React.FC<MotionTrackerProps> = ({
               ? `Pose model failed to load: ${modelError}`
               : cameraStatus === 'starting'
               ? 'Starting camera… allow access when your browser asks.'
-              : 'Loading pose model (first load downloads a few MB)…'}
+              : 'Loading pose and hand models (first load downloads about 15 MB)…'}
           </div>
         )}
       </div>
+      <p className="w-full text-xs text-slate-500">
+        Blue = left, orange = right (your own sides). The picture is not mirrored: your right arm appears on the left of the screen.
+      </p>
 
-      {/* Angle grid */}
-      <div className="w-full grid md:grid-cols-2 gap-4 text-sm">
-        <table className="w-full">
-          <thead>
-            <tr className="text-xs text-slate-400">
-              <th className="text-left font-medium">Joint</th>
-              <th className="text-right font-medium">Left</th>
-              <th className="text-right font-medium">Right</th>
-            </tr>
-          </thead>
-          <tbody>
-            {SIDE_JOINTS.map((k) => (
-              <tr key={k} className="border-t border-slate-800">
-                <td className="py-1 text-slate-300">{JOINT_LABELS[k]}</td>
-                <td className="py-1 text-right font-mono text-blue-400">{fmt(angles.left[k])}</td>
-                <td className="py-1 text-right font-mono text-blue-400">{fmt(angles.right[k])}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div>
-          <table className="w-full">
-            <thead>
-              <tr className="text-xs text-slate-400">
-                <th className="text-left font-medium">Trunk, pelvis, neck</th>
-                <th className="text-right font-medium">Angle</th>
-              </tr>
-            </thead>
-            <tbody>
-              {AXIAL_JOINTS.map((k) => (
-                <tr key={k} className="border-t border-slate-800">
-                  <td className="py-1 text-slate-300">{JOINT_LABELS[k]}</td>
-                  <td className="py-1 text-right font-mono text-blue-400">{fmt(angles.axial[k])}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="mt-2 text-xs text-slate-500">
-            Hip flexion is thigh relative to trunk. “Thigh vs vertical” and “Trunk forward lean” show which one moved.
-            Keep the camera level.
-          </p>
-        </div>
-      </div>
+      <AngleTables values={values} meta={meta} />
 
       {requestError && (
         <p className="w-full text-sm text-amber-400 bg-amber-950/40 border border-amber-900 rounded-lg p-2">{requestError}</p>
